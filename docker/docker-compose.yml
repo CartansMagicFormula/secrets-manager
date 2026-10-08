@@ -1,0 +1,58 @@
+# =============================================================================
+# Secrets manager (own stack, independent of the services it serves).
+#
+#   docker compose -p secrets-manager -f docker/docker-compose.yml up -d --build
+#   Admin UI (dev): http://localhost:8200   (initialize once, then unseal after restarts)
+#
+# Clients (LLM gateway, osiris-hub, …) join the external network
+# "fleet-secrets" (internal: no internet) to reach http://secrets-manager:8200.
+# The vault itself has no internet access at all.
+# =============================================================================
+name: secrets-manager
+
+services:
+  secrets-manager:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: secrets-manager:latest
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DATA_DIR: /data
+      LISTEN_ADDR: ":8200"
+      GRACE_PERIOD: 24h
+    volumes:
+      - sm-data:/data
+    ports:
+      # Admin UI, dev only, bound to localhost. Production: admin network / VPN only.
+      - "127.0.0.1:8200:8200"
+    networks:
+      - fleet-secrets
+      - admin
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+          pids: 50
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  sm-data:
+
+networks:
+  # Shared with clients; internal: no route to the internet
+  fleet-secrets:
+    name: fleet-secrets
+    internal: true
+  # Dev only: published admin port (Docker needs a non-internal network for it)
+  admin:

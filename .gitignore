@@ -1,0 +1,4 @@
+# Encrypted state, audit log and local dev secrets: never committed
+/data/
+/vault/
+/bin/

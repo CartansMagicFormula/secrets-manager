@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Secrets manager</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="nav-inner">
+        <span class="brand"><span class="mark">◆</span> Secrets manager</span>
+        <nav id="tabs" class="tabs hidden" aria-label="Main">
+          <button class="tab" data-view="secrets">Secrets</button>
+          <button class="tab" data-view="clients">Clients</button>
+          <button class="tab" data-view="audit">Audit</button>
+        </nav>
+        <div class="right">
+          <span id="state" class="pill"></span>
+          <button id="seal" class="btn sm ghost hidden">Seal</button>
+          <button id="logout" class="btn sm ghost hidden">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <div id="toast" class="toast hidden" role="status"></div>
+
+      <!-- First start: create the admin and the master key -->
+      <section id="view-init" class="view hidden">
+        <h1>Initialize</h1>
+        <p class="muted">Creates the encrypted vault and the admin account. The master key is shown
+          <strong>once</strong>: store it offline (paper / password manager). Without it the vault
+          cannot be opened after a restart.</p>
+        <form id="init-form" class="card form">
+          <label class="field"><span>Admin username</span>
+            <input name="username" required pattern="[a-z0-9._-]{3,40}" autocomplete="username" /></label>
+          <label class="field"><span>Admin password (min. 14 characters)</span>
+            <input name="password" type="password" required minlength="14" autocomplete="new-password" /></label>
+          <button class="btn primary">Initialize</button>
+        </form>
+      </section>
+
+      <section id="view-masterkey" class="view hidden">
+        <h1>Your master key</h1>
+        <p class="warn">Shown only now. Copy it to a safe place before you continue. The vault never stores it.</p>
+        <div class="card secret mono" id="masterkey-value"></div>
+        <div class="row">
+          <button id="masterkey-copy" class="btn">Copy</button>
+          <button id="masterkey-done" class="btn primary">I stored it safely</button>
+        </div>
+      </section>
+
+      <section id="view-unseal" class="view hidden">
+        <h1>Sealed</h1>
+        <p class="muted">The vault is locked. Enter the master key to open it.</p>
+        <form id="unseal-form" class="card form">
+          <label class="field"><span>Master key</span>
+            <input name="master_key" type="password" required autocomplete="off" spellcheck="false" /></label>
+          <button class="btn primary">Unseal</button>
+        </form>
+      </section>
+
+      <section id="view-login" class="view hidden">
+        <h1>Sign in</h1>
+        <form id="login-form" class="card form">
+          <label class="field"><span>Username</span>
+            <input name="username" required autocomplete="username" /></label>
+          <label class="field"><span>Password</span>
+            <input name="password" type="password" required autocomplete="current-password" /></label>
+          <button class="btn primary">Sign in</button>
+        </form>
+      </section>
+
+      <section id="view-secrets" class="view hidden">
+        <div class="head">
+          <h1>Secrets</h1>
+          <button id="new-secret" class="btn primary">New secret</button>
+        </div>
+        <form id="secret-form" class="card form hidden">
+          <label class="field"><span>Path (service/name)</span>
+            <input name="path" required placeholder="llm-gateway/anthropic" pattern="[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*){1,4}" /></label>
+          <label class="field"><span>Kind</span>
+            <select name="kind">
+              <option value="static">Static (value from a provider, e.g. API key)</option>
+              <option value="generated">Generated (random, can be rotated)</option>
+            </select></label>
+          <label class="field static-only"><span>Value</span>
+            <input name="value" type="password" autocomplete="off" spellcheck="false" /></label>
+          <div class="grid2 generated-only hidden">
+            <label class="field"><span>Alphabet</span>
+              <select name="alphabet"><option>alnum</option><option>hex</option><option>base64url</option></select></label>
+            <label class="field"><span>Length</span>
+              <input name="length" type="number" min="16" max="256" value="40" /></label>
+          </div>
+          <label class="field"><span>Note (optional)</span><input name="note" maxlength="300" /></label>
+          <div class="row">
+            <button type="button" id="secret-cancel" class="btn ghost">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </form>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead><tr><th>Path</th><th>Kind</th><th>Version</th><th>Updated</th><th>Readers</th><th></th></tr></thead>
+            <tbody id="secrets-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-clients" class="view hidden">
+        <div class="head">
+          <h1>Clients</h1>
+          <button id="new-client" class="btn primary">New client</button>
+        </div>
+        <p class="muted">A client is a service. It may only <strong>read</strong> secrets under its path prefixes.</p>
+        <form id="client-form" class="card form hidden">
+          <label class="field"><span>Name</span><input name="name" required pattern="[a-z0-9][a-z0-9_-]{1,40}" placeholder="llm-gateway" /></label>
+          <label class="field"><span>Readable path prefixes (one per line)</span>
+            <textarea name="policies" rows="3" required placeholder="llm-gateway"></textarea></label>
+          <div class="row">
+            <button type="button" id="client-cancel" class="btn ghost">Cancel</button>
+            <button class="btn primary">Create</button>
+          </div>
+        </form>
+        <div id="token-box" class="card hidden">
+          <p class="warn">Client token, shown once. Put it into the client's secret file now.</p>
+          <div class="secret mono" id="token-value"></div>
+          <div class="row"><button id="token-copy" class="btn">Copy</button><button id="token-done" class="btn primary">Done</button></div>
+        </div>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead><tr><th>Name</th><th>Policies</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+            <tbody id="clients-body"></tbody>
+          </table>
+        </div>
+        <div class="card danger-zone">
+          <h2>Master key</h2>
+          <p class="muted">Rotating creates a new master key (shown once); the old one stops working.</p>
+          <button id="rotate-master" class="btn danger">Rotate master key</button>
+        </div>
+      </section>
+
+      <section id="view-audit" class="view hidden">
+        <div class="head">
+          <h1>Audit log</h1>
+          <button id="verify-audit" class="btn">Verify chain</button>
+        </div>
+        <p id="verify-result" class="muted"></p>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Path</th><th>Version</th><th>Result</th></tr></thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </body>
+</html>
