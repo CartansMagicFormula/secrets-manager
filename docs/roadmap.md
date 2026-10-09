@@ -7,15 +7,22 @@
 
 ## Next
 
-1. Commander initializes the real vault (UI), stores the master key offline.
+1. Commander initializes the real vault (UI), stores the master key offline
+   (the running dev container still has the MVP image; redeploy first).
 2. First clients: LLM gateway (provider keys), osiris-hub (Stripe, SMTP, analyzer token).
-3. Small client helpers: Python (osiris-hub, Lumen) and Go (LLM gateway, publisher);
-   fetch at start, re-read on rotation, never log values.
+3. Services consume secrets and certificates (agreed 2026-10-08): Python client
+   helper (osiris-hub, Lumen); sm-agent sidecars for Postgres, Valkey, SeaweedFS,
+   Keycloak; **TLS on every connection to databases, caches and storage, also on
+   private networks**.
 4. Audit head hash shipped daily to Siren (outside verification of the chain).
 
 ## Later
 
-- mTLS client certificates from the vault's own CA (no bearer tokens).
+- Kubernetes login: projected service-account tokens (audience `secrets-manager`)
+  verified by the vault, instead of start-token files.
+- mTLS between services with client certificates from the CA (DB users by
+  certificate, no passwords).
+- CA rotation (two CAs trusted during a transition); optional intermediate CA.
 - Key splitting for the master key (e.g. 2 of 3) — only with a reviewed
   implementation; until then the master key is held by the commander.
 - External security review of the crypto usage.
@@ -23,6 +30,16 @@
 - Backup / restore drill documented and tested.
 
 ## Done
+
+- 2026-10-08: One vault per environment (`ENVIRONMENT`), client lists applied
+  in the UI (generated secrets created inside the vault), one-time enrollment
+  codes, start-token rotation with grace period, `sm-agent enroll`.
+
+- 2026-10-08: Start token → short-lived access token per container instance
+  (renewal, max lifetime, sessions in the UI, per-instance audit); internal PKI
+  (CA, certificates from CSRs with name allow lists, inventory); vault listener
+  TLS 1.3 with its own CA certificate; sm-agent; Go client; end-to-end test
+  with the LLM gateway (23 checks).
 
 - 2026-10-08: MVP — encrypted state, seal / unseal, admin UI, static and generated
   secrets with versions and grace period, clients with read policies, audit chain,

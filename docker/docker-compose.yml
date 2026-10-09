@@ -4,9 +4,14 @@
 #   docker compose -p secrets-manager -f docker/docker-compose.yml up -d --build
 #   Admin UI (dev): http://localhost:8200   (initialize once, then unseal after restarts)
 #
-# Clients (LLM gateway, osiris-hub, …) join the external network
-# "fleet-secrets" (internal: no internet) to reach http://secrets-manager:8200.
-# The vault itself has no internet access at all.
+# Normally started by ~/agents/coding/fleet/fleet.sh (unseal, client list,
+# enrollment, then the stacks).
+#
+# Clients talk TLS only: https://secrets-manager:8443, trusting the CA in the
+# shared volume "fleet-ca" (fleet-ca.crt, public, written by the vault on
+# unseal). Each stack has its own network to the vault (vault-osiris,
+# vault-lumen, vault-gateway; internal: no internet), so stacks share no
+# network with each other. The vault itself has no internet access at all.
 # =============================================================================
 name: secrets-manager
 
@@ -23,15 +28,29 @@ services:
       - no-new-privileges:true
     environment:
       DATA_DIR: /data
-      LISTEN_ADDR: ":8200"
+      LISTEN_ADDR: ":8443"
+      # Dev only: plain-HTTP admin UI (no client endpoints), published on localhost below
+      ADMIN_HTTP_ADDR: ":8200"
+      COOKIE_SECURE: "false"
       GRACE_PERIOD: 24h
+      ACCESS_TTL: 1h
+      ACCESS_MAX: 24h
+      SERVER_NAMES: secrets-manager,localhost,127.0.0.1
+      CA_EXPORT_DIR: /ca
+      ENVIRONMENT: dev
     volumes:
       - sm-data:/data
+      - fleet-ca:/ca
     ports:
-      # Admin UI, dev only, bound to localhost. Production: admin network / VPN only.
+      # Admin UI, dev only, bound to localhost. Production: admin network / VPN only (TLS).
       - "127.0.0.1:8200:8200"
+      # Client API (TLS) for the build machine, which in dev is this PC (osiris-build reads
+      # its key here). Staging / production: the build VM reaches the vault over WireGuard.
+      - "127.0.0.1:8443:8443"
     networks:
-      - fleet-secrets
+      - vault-osiris
+      - vault-lumen
+      - vault-gateway
       - admin
     deploy:
       resources:
@@ -48,11 +67,20 @@ services:
 
 volumes:
   sm-data:
+  # Public CA certificate for all clients (mounted read-only by them)
+  fleet-ca:
+    name: fleet-ca
 
 networks:
-  # Shared with clients; internal: no route to the internet
-  fleet-secrets:
-    name: fleet-secrets
+  # One per stack (clients join theirs as external); internal: no route to the internet
+  vault-osiris:
+    name: vault-osiris
+    internal: true
+  vault-lumen:
+    name: vault-lumen
+    internal: true
+  vault-gateway:
+    name: vault-gateway
     internal: true
   # Dev only: published admin port (Docker needs a non-internal network for it)
   admin:

@@ -15,9 +15,11 @@
         <nav id="tabs" class="tabs hidden" aria-label="Main">
           <button class="tab" data-view="secrets">Secrets</button>
           <button class="tab" data-view="clients">Clients</button>
+          <button class="tab" data-view="certificates">Certificates</button>
           <button class="tab" data-view="audit">Audit</button>
         </nav>
         <div class="right">
+          <span id="environment" class="pill"></span>
           <span id="state" class="pill"></span>
           <button id="seal" class="btn sm ghost hidden">Seal</button>
           <button id="logout" class="btn sm ghost hidden">Sign out</button>
@@ -112,33 +114,82 @@
       <section id="view-clients" class="view hidden">
         <div class="head">
           <h1>Clients</h1>
-          <button id="new-client" class="btn primary">New client</button>
+          <div class="row">
+            <button id="apply-list" class="btn">Apply client list</button>
+            <button id="new-client" class="btn primary">New client</button>
+          </div>
         </div>
-        <p class="muted">A client is a service. It may only <strong>read</strong> secrets under its path prefixes.</p>
+        <form id="apply-form" class="card form hidden">
+          <label class="field"><span>Client list of this environment (JSON from the repo; no secret values)</span>
+            <textarea name="list" rows="10" class="mono" required spellcheck="false"></textarea></label>
+          <p class="muted">Creates missing clients and generated secrets, updates policies and certificate
+            names. Never deletes, never shows values. New clients get their start token by enrollment.</p>
+          <div class="row">
+            <button type="button" id="apply-cancel" class="btn ghost">Cancel</button>
+            <button class="btn primary">Apply</button>
+          </div>
+        </form>
+        <div id="apply-report" class="card hidden"></div>
+        <div id="enroll-box" class="card hidden">
+          <p class="warn">One-time enrollment code for <strong id="enroll-client"></strong>: works once,
+            expires <span id="enroll-expires"></span>. Run on the service server, then paste the code:</p>
+          <div class="secret mono" id="enroll-command"></div>
+          <div class="secret mono" id="enroll-code"></div>
+          <div class="row"><button id="enroll-copy" class="btn">Copy code</button><button id="enroll-done" class="btn primary">Done</button></div>
+        </div>
+        <p class="muted">A client is a service. It may only <strong>read</strong> secrets under its path prefixes
+          and get TLS certificates for its certificate names. Its start token only logs in: each container
+          instance gets its own access token (1 h, renewable up to 24 h), listed under active sessions.</p>
         <form id="client-form" class="card form hidden">
           <label class="field"><span>Name</span><input name="name" required pattern="[a-z0-9][a-z0-9_-]{1,40}" placeholder="llm-gateway" /></label>
-          <label class="field"><span>Readable path prefixes (one per line)</span>
-            <textarea name="policies" rows="3" required placeholder="llm-gateway"></textarea></label>
+          <label class="field"><span>Readable path prefixes (one per line, optional for certificate-only clients)</span>
+            <textarea name="policies" rows="3" placeholder="llm-gateway"></textarea></label>
+          <label class="field"><span>Certificate names (DNS names / IP addresses, one per line, optional)</span>
+            <textarea name="pki_names" rows="2" placeholder="postgres"></textarea></label>
           <div class="row">
             <button type="button" id="client-cancel" class="btn ghost">Cancel</button>
             <button class="btn primary">Create</button>
           </div>
         </form>
         <div id="token-box" class="card hidden">
-          <p class="warn">Client token, shown once. Put it into the client's secret file now.</p>
+          <p class="warn">Start token, shown once. Put it into the client's token file now.</p>
           <div class="secret mono" id="token-value"></div>
           <div class="row"><button id="token-copy" class="btn">Copy</button><button id="token-done" class="btn primary">Done</button></div>
         </div>
         <div class="card table-wrap">
           <table class="table">
-            <thead><tr><th>Name</th><th>Policies</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Policies</th><th>Certificate names</th><th>Last login</th><th>Status</th><th></th></tr></thead>
             <tbody id="clients-body"></tbody>
+          </table>
+        </div>
+        <h2>Active sessions</h2>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead><tr><th>Client</th><th>Instance</th><th>Logged in</th><th>Expires</th><th>Latest end</th><th></th></tr></thead>
+            <tbody id="sessions-body"></tbody>
           </table>
         </div>
         <div class="card danger-zone">
           <h2>Master key</h2>
           <p class="muted">Rotating creates a new master key (shown once); the old one stops working.</p>
           <button id="rotate-master" class="btn danger">Rotate master key</button>
+        </div>
+      </section>
+
+      <section id="view-certificates" class="view hidden">
+        <div class="head">
+          <h1>Certificates</h1>
+          <button id="ca-copy" class="btn">Copy CA certificate</button>
+        </div>
+        <p class="muted">The vault's internal CA signs short-lived TLS certificates for clients (from their CSRs;
+          private keys never reach the vault). Services trust the CA certificate (public, also in the
+          <span class="mono">fleet-ca</span> volume).</p>
+        <div class="card secret mono" id="ca-value"></div>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead><tr><th>Issued (UTC)</th><th>Client</th><th>Usage</th><th>Names</th><th>Valid until</th><th>Serial</th></tr></thead>
+            <tbody id="certificates-body"></tbody>
+          </table>
         </div>
       </section>
 

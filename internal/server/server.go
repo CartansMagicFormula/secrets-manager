@@ -1,11 +1,13 @@
 // Package server is the secrets manager's HTTP API and admin UI.
 //
 // Admin: session cookie (after unseal), state changes need the CSRF header.
-// Clients: bearer token, read-only on the paths their policy allows.
+// Clients: start token → short-lived access token per container instance;
+// read-only on the paths their policy allows; certificates for allowed names.
 // Values never appear in logs, errors or list responses.
 package server
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -20,6 +22,7 @@ import (
 
 	"secrets-manager/internal/audit"
 	"secrets-manager/internal/crypto"
+	"secrets-manager/internal/pki"
 	"secrets-manager/internal/store"
 )
 
@@ -40,6 +43,11 @@ type Config struct {
 	Logger       *slog.Logger
 	UI           fs.FS // embedded admin UI (nil: no UI)
 	Now          func() time.Time
+	AccessTTL    time.Duration // lifetime of an access token, renewable
+	AccessMax    time.Duration // renewals end here; the client logs in again
+	ServerNames  []string      // names in the vault's own TLS certificate
+	CAExportDir  string        // where the public CA certificate is written ("" = nowhere)
+	Environment  string        // dev | staging | production: one vault per environment
 }
 
 type session struct {
@@ -56,6 +64,12 @@ type Server struct {
 	sessions map[string]session
 	login    *limiter
 	unseal   *limiter
+
+	access      map[string]*access    // MAC of access token -> session
+	enrollments map[string]enrollment // MAC of one-time code -> client (memory only)
+	authLimit   *limiter
+	ca          *pki.CA
+	vaultCert   *tls.Certificate
 }
 
 // New prepares the server (sealed until unseal or init).
@@ -69,16 +83,34 @@ func New(cfg Config) (*Server, error) {
 	if cfg.GracePeriod == 0 {
 		cfg.GracePeriod = 24 * time.Hour
 	}
+	if cfg.AccessTTL == 0 {
+		cfg.AccessTTL = time.Hour
+	}
+	if cfg.AccessMax == 0 {
+		cfg.AccessMax = 24 * time.Hour
+	}
+	if len(cfg.ServerNames) == 0 {
+		cfg.ServerNames = []string{"secrets-manager", "localhost", "127.0.0.1"}
+	}
+	if cfg.Environment == "" {
+		cfg.Environment = "dev"
+	}
+	if cfg.Environment != "dev" && cfg.Environment != "staging" && cfg.Environment != "production" {
+		return nil, errors.New("environment must be dev, staging or production")
+	}
 	log, err := audit.Open(filepath.Join(cfg.DataDir, "audit.log"))
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
-		cfg:      cfg,
-		audit:    log,
-		sessions: map[string]session{},
-		login:    newLimiter(5, time.Minute),
-		unseal:   newLimiter(10, time.Minute),
+		cfg:         cfg,
+		audit:       log,
+		sessions:    map[string]session{},
+		login:       newLimiter(5, time.Minute),
+		unseal:      newLimiter(10, time.Minute),
+		access:      map[string]*access{},
+		enrollments: map[string]enrollment{},
+		authLimit:   newLimiter(10, time.Minute),
 	}, nil
 }
 
@@ -96,6 +128,9 @@ func (s *Server) Unseal(master []byte) error {
 		return err
 	}
 	s.vault = v
+	if err := s.ensureCA(); err != nil {
+		s.cfg.Logger.Error("CA unavailable", "error", err.Error())
+	}
 	return nil
 }
 
@@ -121,7 +156,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/master-key/rotate", s.csrf(s.admin(s.rotateMasterKey)))
 	mux.HandleFunc("GET /v1/admin/audit", s.admin(s.auditTail))
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.admin(s.auditVerify))
-	mux.HandleFunc("GET /v1/secrets/{path...}", s.clientRead)
+	mux.HandleFunc("GET /v1/admin/sessions", s.admin(s.listSessions))
+	mux.HandleFunc("DELETE /v1/admin/sessions/{id}", s.csrf(s.admin(s.endSession)))
+	mux.HandleFunc("GET /v1/admin/certificates", s.admin(s.listCertificates))
+	mux.HandleFunc("POST /v1/admin/clients/{id}/enroll", s.csrf(s.admin(s.enrollClient)))
+	mux.HandleFunc("POST /v1/admin/apply", s.csrf(s.admin(s.applyClientList)))
+	mux.HandleFunc("POST /v1/auth/enroll", s.exchangeEnrollment)
+	mux.HandleFunc("POST /v1/auth/login", s.clientLogin)
+	mux.HandleFunc("POST /v1/auth/renew", s.clientAuth(s.renew))
+	mux.HandleFunc("POST /v1/auth/logout", s.clientAuth(s.logout))
+	mux.HandleFunc("GET /v1/secrets/{path...}", s.clientAuth(s.clientRead))
+	mux.HandleFunc("GET /v1/pki/ca", s.caCert)
+	mux.HandleFunc("POST /v1/pki/issue", s.clientAuth(s.issueCertificate))
 	if s.cfg.UI != nil {
 		mux.Handle("GET /", http.FileServerFS(s.cfg.UI))
 	}
@@ -223,7 +269,7 @@ func (s *Server) record(actor, action, path string, version int, ok bool, detail
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"initialized": store.Exists(s.statePath()), "sealed": s.vault == nil})
+	writeJSON(w, 200, map[string]any{"initialized": store.Exists(s.statePath()), "sealed": s.vault == nil, "environment": s.cfg.Environment})
 }
 
 func (s *Server) initVault(w http.ResponseWriter, r *http.Request) {
@@ -263,6 +309,9 @@ func (s *Server) initVault(w http.ResponseWriter, r *http.Request) {
 	}
 	s.vault = v
 	s.record("admin:"+body.Username, "vault.init", "", 0, true, "")
+	if err := s.ensureCA(); err != nil {
+		s.cfg.Logger.Error("CA unavailable", "error", err.Error())
+	}
 	// The only moment the master key leaves the server
 	writeJSON(w, 201, map[string]string{"master_key": crypto.EncodeKey(master)})
 }
@@ -301,6 +350,9 @@ func (s *Server) seal(w http.ResponseWriter, _ *http.Request, user string) {
 		s.vault = nil
 	}
 	s.sessions = map[string]session{}
+	s.access = map[string]*access{}
+	s.enrollments = map[string]enrollment{}
+	s.ca, s.vaultCert = nil, nil
 	s.mu.Unlock()
 	s.record("admin:"+user, "vault.seal", "", 0, true, "")
 	writeJSON(w, 200, map[string]bool{"sealed": true})
@@ -347,7 +399,7 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 	s.sessions[id] = session{user: admin.Username, expires: s.cfg.Now().Add(s.cfg.SessionIdle)}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteStrictMode,
+		Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure || r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
 	s.record("admin:"+admin.Username, "admin.login", "", 0, true, "")
 	writeJSON(w, 200, map[string]string{"user": admin.Username})
@@ -359,7 +411,7 @@ func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, cookie.Value)
 		s.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure || r.TLS != nil, SameSite: http.SameSiteStrictMode})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -550,13 +602,18 @@ type clientView struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
 	Policies   []string   `json:"policies"`
+	PKINames   []string   `json:"pki_names"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	RevokedAt  *time.Time `json:"revoked_at"`
 }
 
 func viewClient(c *store.Client) clientView {
-	return clientView{ID: c.ID, Name: c.Name, Policies: c.Policies, CreatedAt: c.CreatedAt, LastUsedAt: c.LastUsedAt, RevokedAt: c.RevokedAt}
+	pkiNames := c.PKINames
+	if pkiNames == nil {
+		pkiNames = []string{}
+	}
+	return clientView{ID: c.ID, Name: c.Name, Policies: c.Policies, PKINames: pkiNames, CreatedAt: c.CreatedAt, LastUsedAt: c.LastUsedAt, RevokedAt: c.RevokedAt}
 }
 
 var usernamePattern = regexp.MustCompile(`^[a-z0-9._-]{3,40}$`)
@@ -577,6 +634,7 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request, user strin
 	var body struct {
 		Name     string   `json:"name"`
 		Policies []string `json:"policies"`
+		PKINames []string `json:"pki_names"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		fail(w, 400, "invalid JSON")
@@ -586,8 +644,12 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request, user strin
 		fail(w, 422, "name: 2-41 characters a-z 0-9 _ -")
 		return
 	}
-	if len(body.Policies) == 0 || len(body.Policies) > 20 {
-		fail(w, 422, "1 to 20 policies")
+	if len(body.Policies) > 20 || len(body.Policies) == 0 && len(body.PKINames) == 0 {
+		fail(w, 422, "1 to 20 policies (or certificate names only)")
+		return
+	}
+	if !validPKINames(body.PKINames) {
+		fail(w, 422, "certificate names: up to 20 DNS names or IP addresses")
 		return
 	}
 	for _, p := range body.Policies {
@@ -613,7 +675,7 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request, user strin
 	}
 	c := &store.Client{
 		ID: id, Name: body.Name, TokenMAC: crypto.MAC(s.vault.State.ServerKey, token),
-		Policies: body.Policies, CreatedAt: s.cfg.Now(),
+		Policies: body.Policies, PKINames: body.PKINames, CreatedAt: s.cfg.Now(),
 	}
 	s.vault.State.Clients[id] = c
 	if err := s.vault.Save(); err != nil {
@@ -635,6 +697,7 @@ func (s *Server) revokeClient(w http.ResponseWriter, r *http.Request, user strin
 	if c.RevokedAt == nil {
 		now := s.cfg.Now()
 		c.RevokedAt = &now
+		s.dropClientSessions(c.ID)
 		if err := s.vault.Save(); err != nil {
 			fail(w, 500, "save failed")
 			return
@@ -681,31 +744,8 @@ func (s *Server) auditVerify(w http.ResponseWriter, _ *http.Request, _ string) {
 
 // ---------------------------------------------------------------- clients (read)
 
-func (s *Server) clientRead(w http.ResponseWriter, r *http.Request) {
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || !strings.HasPrefix(token, tokenPrefix) {
-		fail(w, 401, "unauthorized")
-		return
-	}
+func (s *Server) clientRead(w http.ResponseWriter, r *http.Request, a *access, client *store.Client) {
 	path := r.PathValue("path")
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.vault == nil {
-		fail(w, http.StatusServiceUnavailable, "sealed")
-		return
-	}
-	mac := crypto.MAC(s.vault.State.ServerKey, token)
-	var client *store.Client
-	for _, c := range s.vault.State.Clients {
-		if crypto.MACEqual(c.TokenMAC, mac) {
-			client = c
-		}
-	}
-	if client == nil || client.RevokedAt != nil {
-		s.record("anonymous", "secret.read", path, 0, false, "unknown token")
-		fail(w, 401, "unauthorized")
-		return
-	}
 	actor := "client:" + client.Name
 	sec, exists := s.vault.State.Secrets[path]
 	// Same answer for "not allowed" and "does not exist": no probing of paths
@@ -723,12 +763,7 @@ func (s *Server) clientRead(w http.ResponseWriter, r *http.Request) {
 		}
 		version = prev
 	}
-	now := s.cfg.Now()
-	client.LastUsedAt = &now
-	if err := s.vault.Save(); err != nil {
-		s.cfg.Logger.Warn("could not record last use")
-	}
-	s.record(actor, "secret.read", path, version.Number, true, "")
+	s.record(actor, "secret.read", path, version.Number, true, "instance "+a.Instance)
 	writeJSON(w, 200, map[string]any{"path": path, "version": version.Number, "value": version.Value})
 }
 

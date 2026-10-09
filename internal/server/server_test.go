@@ -91,6 +91,15 @@ func (hs *harness) login() {
 	}
 }
 
+// clientLogin exchanges a start token for an access token.
+func (hs *harness) clientLogin(start, instance string) string {
+	rec := hs.do("POST", "/v1/auth/login", `{"instance":"`+instance+`"}`, map[string]string{"Authorization": "Bearer " + start})
+	if rec.Code != 200 {
+		hs.t.Fatalf("client login: %d %s", rec.Code, rec.Body)
+	}
+	return decode(hs.t, rec)["access_token"].(string)
+}
+
 func TestFullFlow(t *testing.T) {
 	hs := newHarness(t)
 	if s := decode(t, hs.do("GET", "/v1/sys/status", "", nil)); s["initialized"] != false || s["sealed"] != true {
@@ -119,22 +128,27 @@ func TestFullFlow(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("client: %d %s", rec.Code, rec.Body)
 	}
-	token := decode(t, rec)["token"].(string)
+	start := decode(t, rec)["token"].(string)
 	read := func(path, tok string) *httptest.ResponseRecorder {
 		return hs.do("GET", "/v1/secrets/"+path, "", map[string]string{"Authorization": "Bearer " + tok})
 	}
+	if read("llm-gateway/anthropic", start).Code != 401 {
+		t.Fatal("start token reads secrets directly (must only log in)")
+	}
+	token := hs.clientLogin(start, "llm-gateway-1")
 	if got := decode(t, read("llm-gateway/anthropic", token)); got["value"] != "sk-ant-123" || got["version"] != float64(1) {
 		t.Fatalf("client read: %v", got)
 	}
 	if read("osiris/analyzer-token", token).Code != 403 || read("llm-gateway/missing", token).Code != 403 {
 		t.Fatal("policy not enforced (or existence leaked)")
 	}
-	if read("llm-gateway/anthropic", "smt_wrong").Code != 401 {
+	if read("llm-gateway/anthropic", "sma_wrong").Code != 401 {
 		t.Fatal("wrong token accepted")
 	}
 
 	// Rotation keeps the previous version readable during the grace period
-	osiris := decode(t, hs.do("POST", "/v1/admin/clients", `{"name":"osiris-hub","policies":["osiris"]}`, nil))["token"].(string)
+	osirisStart := decode(t, hs.do("POST", "/v1/admin/clients", `{"name":"osiris-hub","policies":["osiris"]}`, nil))["token"].(string)
+	osiris := hs.clientLogin(osirisStart, "osiris-hub-1")
 	first := decode(t, read("osiris/analyzer-token", osiris))["value"].(string)
 	if hs.do("POST", "/v1/admin/rotate/osiris/analyzer-token", "", nil).Code != 200 {
 		t.Fatal("rotate")
@@ -147,6 +161,10 @@ func TestFullFlow(t *testing.T) {
 		t.Fatal("previous version not readable in grace period")
 	}
 	hs.now = hs.now.Add(25 * time.Hour)
+	if read("osiris/analyzer-token", osiris).Code != 401 {
+		t.Fatal("access token valid after its lifetime")
+	}
+	osiris = hs.clientLogin(osirisStart, "osiris-hub-1")
 	if read("osiris/analyzer-token?version=previous", osiris).Code != 404 {
 		t.Fatal("previous version readable after grace period")
 	}
@@ -161,6 +179,7 @@ func TestFullFlow(t *testing.T) {
 	}
 	clients := []map[string]any{}
 	_ = json.Unmarshal(hs.do("GET", "/v1/admin/clients", "", nil).Body.Bytes(), &clients)
+	token = hs.clientLogin(start, "llm-gateway-1")
 	for _, c := range clients {
 		if c["name"] == "llm-gateway" {
 			hs.do("DELETE", "/v1/admin/clients/"+c["id"].(string), "", nil)
@@ -168,6 +187,9 @@ func TestFullFlow(t *testing.T) {
 	}
 	if read("llm-gateway/anthropic", token).Code != 401 {
 		t.Fatal("revoked client can read")
+	}
+	if hs.do("POST", "/v1/auth/login", `{"instance":"x"}`, map[string]string{"Authorization": "Bearer " + start}).Code != 401 {
+		t.Fatal("revoked client can log in")
 	}
 
 	// Seal: everything refused; unseal with the master key restores state
@@ -187,6 +209,10 @@ func TestFullFlow(t *testing.T) {
 		t.Fatal("session survived sealing")
 	}
 	hs.login()
+	if read("osiris/analyzer-token", osiris).Code != 401 {
+		t.Fatal("access token survived sealing")
+	}
+	osiris = hs.clientLogin(osirisStart, "osiris-hub-1")
 	if decode(t, read("osiris/analyzer-token", osiris))["version"] != float64(2) {
 		t.Fatal("state lost across seal/unseal")
 	}
@@ -194,7 +220,7 @@ func TestFullFlow(t *testing.T) {
 	// Nothing secret on disk or in the audit log
 	for _, name := range []string{"state.json", "audit.log"} {
 		raw, _ := os.ReadFile(filepath.Join(hs.dir, name))
-		if strings.Contains(string(raw), "sk-ant-123") || strings.Contains(string(raw), first) || strings.Contains(string(raw), token) {
+		if strings.Contains(string(raw), "sk-ant-123") || strings.Contains(string(raw), first) || strings.Contains(string(raw), token) || strings.Contains(string(raw), start) {
 			t.Fatalf("%s contains a secret value", name)
 		}
 	}

@@ -63,13 +63,17 @@ func (s *Secret) Previous() (Version, bool) {
 
 // Client is a service allowed to read some paths.
 type Client struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	TokenMAC   []byte     `json:"token_mac"`
-	Policies   []string   `json:"policies"` // path prefixes, read-only
-	CreatedAt  time.Time  `json:"created_at"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	TokenMAC []byte `json:"token_mac"`
+	// After a start-token rotation the previous token keeps working until PrevUntil
+	PrevTokenMAC []byte     `json:"prev_token_mac,omitempty"`
+	PrevUntil    *time.Time `json:"prev_until,omitempty"`
+	Policies     []string   `json:"policies"`            // path prefixes, read-only
+	PKINames     []string   `json:"pki_names,omitempty"` // names allowed in its certificates
+	CreatedAt    time.Time  `json:"created_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 }
 
 // Allows reports whether the client may read path (prefix on segment boundary).
@@ -94,12 +98,42 @@ type Admin struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// CA of the vault's internal PKI.
+type CA struct {
+	CertPEM   []byte    `json:"cert_pem"`
+	KeyDER    []byte    `json:"key_der"` // PKCS#8, only ever inside the encrypted state
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Certificate issued by the CA (inventory; no keys).
+type Certificate struct {
+	Serial   string    `json:"serial"`
+	Client   string    `json:"client"`
+	Usage    string    `json:"usage"`
+	Names    []string  `json:"names"`
+	IssuedAt time.Time `json:"issued_at"`
+	NotAfter time.Time `json:"not_after"`
+}
+
+// MaxCertificates kept in the inventory (oldest dropped).
+const MaxCertificates = 500
+
 // State is everything the vault knows (encrypted at rest).
 type State struct {
-	ServerKey []byte             `json:"server_key"` // HMAC key for client tokens
-	Admin     Admin              `json:"admin"`
-	Secrets   map[string]*Secret `json:"secrets"`
-	Clients   map[string]*Client `json:"clients"`
+	ServerKey    []byte             `json:"server_key"` // HMAC key for client tokens
+	Admin        Admin              `json:"admin"`
+	Secrets      map[string]*Secret `json:"secrets"`
+	Clients      map[string]*Client `json:"clients"`
+	CA           *CA                `json:"ca,omitempty"`
+	Certificates []Certificate      `json:"certificates,omitempty"`
+}
+
+// AddCertificate records an issued certificate.
+func (s *State) AddCertificate(c Certificate) {
+	s.Certificates = append(s.Certificates, c)
+	if len(s.Certificates) > MaxCertificates {
+		s.Certificates = s.Certificates[len(s.Certificates)-MaxCertificates:]
+	}
 }
 
 // SecretPaths sorted.

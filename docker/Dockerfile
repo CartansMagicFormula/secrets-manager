@@ -8,12 +8,19 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 COPY web/ web/
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -ldflags "-s -w" -o /out/secrets-manager ./cmd/secrets-manager \
-    && mkdir -p /out/data
+    && CGO_ENABLED=0 GOFLAGS=-trimpath go build -ldflags "-s -w" -o /out/sm-agent ./cmd/sm-agent \
+    && mkdir -p /out/data /out/ca /out/certs
 
+# Two binaries: the vault (default) and sm-agent (sidecar / init container for
+# services that read certificates and secrets from files; entrypoint /sm-agent)
 FROM scratch
 COPY --from=build /out/secrets-manager /secrets-manager
+COPY --from=build /out/sm-agent /sm-agent
 COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build --chown=65532:65532 /out/ca /ca
+# Mount point for sm-agent certificate volumes (a new volume inherits this owner)
+COPY --from=build --chown=65532:65532 /out/certs /certs
 USER 65532:65532
-EXPOSE 8200
+EXPOSE 8443
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 CMD ["/secrets-manager", "healthcheck"]
 ENTRYPOINT ["/secrets-manager"]
