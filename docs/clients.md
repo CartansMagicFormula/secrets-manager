@@ -80,8 +80,8 @@ ENTRYPOINT ["/usr/local/bin/sm-agent", "-once", "-secret", "osiris/analyzer/toke
 ## Vault side: client list and enrollment (scripted)
 
 One client per service and purpose (least privilege), defined in the
-environment's client list (`~/agents/coding/fleet/vault-clients/<env>.json`).
-`fleet.sh up` does all of it (runbook: `~/agents/coding/docs/setup-runbook.md`):
+environment's client list (`~/agents/coding/fleet/config/vault-clients/<env>.json`).
+`fleet.sh up` does all of it (runbook: `~/agents/coding/fleet/runbook.md`):
 
 1. **Apply** (`secrets-manager admin apply`, also a UI button): creates clients
    and generated secrets; lists static secrets to enter in the Secrets tab.

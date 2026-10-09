@@ -4,7 +4,7 @@
 #   docker compose -p secrets-manager -f docker/docker-compose.yml up -d --build
 #   Admin UI (dev): http://localhost:8200   (initialize once, then unseal after restarts)
 #
-# Normally started by ~/agents/coding/fleet/fleet.sh (unseal, client list,
+# Normally started by ~/agents/coding/framework/scripts/fleet.sh (unseal, client list,
 # enrollment, then the stacks).
 #
 # Clients talk TLS only: https://secrets-manager:8443, trusting the CA in the

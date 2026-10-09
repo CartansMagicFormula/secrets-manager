@@ -75,7 +75,7 @@ before expiry   ── POST /v1/auth/renew (+1 h, up to 24 h after login) ──
 - **Three vaults** (dev, staging, production), each with its own master key,
   CA and secrets; `ENVIRONMENT` names it (shown in the UI, checked when a
   client list is applied). Paths carry no environment prefix.
-- **Client lists** (`~/agents/coding/fleet/vault-clients/<env>.json`, no
+- **Client lists** (`~/agents/coding/fleet/config/vault-clients/<env>.json`, no
   values): "Apply client list" (`POST /v1/admin/apply`) creates missing
   clients and generated secrets inside the vault and updates policies /
   certificate names. Never deletes, never returns values; reports static

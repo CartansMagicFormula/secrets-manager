@@ -8,7 +8,7 @@ hash-chained audit log, has an embedded admin UI (plain HTML/CSS/JS, no npm).
 Architecture and threat model: `docs/architecture.md`; connecting services:
 `docs/clients.md`; roadmap: `docs/roadmap.md`.
 
-Fleet-wide rules apply and have priority: `~/agents/coding/docs/agentic-ai/agent-rules.md`.
+Fleet-wide rules apply and have priority: `~/agents/coding/framework/rules/agent-rules.md`.
 
 - **Claude never handles real secret values**: the real vault is initialized and
   unsealed by the commander in the UI; the master key exists only with the
@@ -27,9 +27,9 @@ docker compose -p secrets-manager -f docker/docker-compose.yml up -d --build
 
 One vault per environment (`ENVIRONMENT`: dev / staging / production; staging
 and production on their own servers). Normal setup is scripted:
-`~/agents/coding/fleet/fleet.sh up` (runbook: `~/agents/coding/docs/setup-runbook.md`)
+`~/agents/coding/framework/scripts/fleet.sh up` (runbook: `~/agents/coding/fleet/runbook.md`)
 initializes / unseals, applies the client list
-(`~/agents/coding/fleet/vault-clients/<env>.json`) and enrolls every client,
+(`~/agents/coding/fleet/config/vault-clients/<env>.json`) and enrolls every client,
 using the admin commands inside the container (loopback; secrets on stdin):
 
 ```bash
