@@ -2,3 +2,16 @@
 /data/
 /vault/
 /bin/
+# Never commit secret material, even by mistake
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+# Go test / coverage output, editors, OS
+*.test
+*.out
+.idea/
+.vscode/
+.DS_Store
