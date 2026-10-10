@@ -10,7 +10,7 @@
 # Clients talk TLS only: https://secrets-manager:8443, trusting the CA in the
 # shared volume "fleet-ca" (fleet-ca.crt, public, written by the vault on
 # unseal). Each stack has its own network to the vault (vault-osiris,
-# vault-lumen, vault-gateway; internal: no internet), so stacks share no
+# vault-lumen, vault-gateway, vault-sageo; internal: no internet), so stacks share no
 # network with each other. The vault itself has no internet access at all.
 # =============================================================================
 name: secrets-manager
@@ -51,6 +51,7 @@ services:
       - vault-osiris
       - vault-lumen
       - vault-gateway
+      - vault-sageo
       - admin
     deploy:
       resources:
@@ -81,6 +82,9 @@ networks:
     internal: true
   vault-gateway:
     name: vault-gateway
+    internal: true
+  vault-sageo:
+    name: vault-sageo
     internal: true
   # Dev only: published admin port (Docker needs a non-internal network for it)
   admin:
